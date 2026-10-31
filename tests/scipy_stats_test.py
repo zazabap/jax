@@ -1269,13 +1269,49 @@ class LaxBackedScipyStatsTests(jtu.JaxTestCase):
       self._CheckAgainstNumpy(scipy_fun, lax_fun, args_maker, check_dtypes=False,
                               tol=1e-3)
 
+  @genNamedParametersNArgs(5)
+  def testTruncnormPpf(self, shapes, dtypes):
+    rng_q = jtu.rand_uniform(self.rng(), low=0.01, high=0.99)
+    rng = jtu.rand_default(self.rng())
+    scipy_fun = osp_stats.truncnorm.ppf
+    lax_fun = lsp_stats.truncnorm.ppf
+
+    def args_maker():
+      q = rng_q(shapes[0], dtypes[0])
+      a, b, loc, scale = map(rng, shapes[1:], dtypes[1:])
+      scale = np.clip(np.abs(scale), a_min=0.1, a_max=None).astype(scale.dtype)
+      return [q, a, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+          scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+
+  @genNamedParametersNArgs(5)
+  def testTruncnormIsf(self, shapes, dtypes):
+    rng_q = jtu.rand_uniform(self.rng(), low=0.01, high=0.99)
+    rng = jtu.rand_default(self.rng())
+    scipy_fun = osp_stats.truncnorm.isf
+    lax_fun = lsp_stats.truncnorm.isf
+
+    def args_maker():
+      q = rng_q(shapes[0], dtypes[0])
+      a, b, loc, scale = map(rng, shapes[1:], dtypes[1:])
+      scale = np.clip(np.abs(scale), a_min=0.1, a_max=None).astype(scale.dtype)
+      return [q, a, b, loc, scale]
+
+    with jtu.strict_promotion_if_dtypes_match(dtypes):
+      self._CheckAgainstNumpy(
+          scipy_fun, lax_fun, args_maker, check_dtypes=False, tol=1e-3
+      )
+
   @jtu.sample_product(
-    fun=["logpdf", "pdf", "cdf", "sf", "logcdf", "logsf"],
+    fun=["logpdf", "pdf", "cdf", "sf", "logcdf", "logsf", "ppf", "isf"],
     dtype=jtu.dtypes.floating,
   )
   def testTruncnormNanPropagation(self, fun, dtype):
     # https://github.com/jax-ml/jax/issues/38606: NaN in any argument -> NaN.
-    x = np.array([np.nan, 3, -3, 0.5, 0.5, 0.5], dtype)
+    x = np.array([np.nan, 0.5, 0.2, 0.5, 0.5, 0.5], dtype)
     a = np.array([-1, np.nan, -1, -1, -1, -1], dtype)
     b = np.array([2, 2, np.nan, 2, 2, 2], dtype)
     loc = np.array([0, 0, 0, np.nan, 0, 0], dtype)
@@ -1284,6 +1320,276 @@ class LaxBackedScipyStatsTests(jtu.JaxTestCase):
                             getattr(lsp_stats.truncnorm, fun),
                             lambda: [x, a, b, loc, scale],
                             check_dtypes=False, tol=1e-3)
+
+  @jtu.sample_product(dtype=jtu.dtypes.floating)
+  def testTruncnormNarrowAndTail(self, dtype):
+    # Comprehensive ULP sweeps are in tests/numerics/truncnorm_test.py; this
+    # checks narrow, tail, and extreme-tail regimes in OSS and x32 CI.
+    is_f32 = jnp.finfo(dtype).bits <= 32
+    delta = 1e-4 if is_f32 else 1e-8
+    tail_a = 8.0 if is_f32 else 25.0
+    a = np.array([1.2, tail_a, -tail_a - 2.0, -np.inf, 2.0], dtype=dtype)
+    b = np.array(
+        [1.2 + delta, tail_a + 2.0, -tail_a, -3.0, np.inf], dtype=dtype
+    )
+    q = np.array([0.25, 0.5, 0.75, 0.1, 0.9], dtype=dtype)
+    loc = np.array(0.5, dtype=dtype)
+    scale = np.array(1.5, dtype=dtype)
+
+    x_ppf = lsp_stats.truncnorm.ppf(q, a, b, loc, scale)
+    x_isf = lsp_stats.truncnorm.isf(q, a, b, loc, scale)
+    rtol = 1e-5 if is_f32 else 1e-12
+    self.assertAllClose(
+        x_ppf,
+        osp_stats.truncnorm.ppf(q, a, b, loc, scale).astype(dtype),
+        rtol=rtol, atol=rtol,
+    )
+    self.assertAllClose(
+        x_isf,
+        osp_stats.truncnorm.isf(q, a, b, loc, scale).astype(dtype),
+        rtol=rtol, atol=rtol,
+    )
+    # Round-trip cdf(ppf(q)) == q and sf(isf(q)) == q: 1-ULP rounding of
+    # `x_ppf` perturbs `cdf` on `[1.2, 1.2 + delta]` by `ulp(x)/(scale*delta)`.
+    rt_tol = 5e-3 if is_f32 else 2e-8
+    self.assertAllClose(
+        lsp_stats.truncnorm.cdf(x_ppf, a, b, loc, scale),
+        q, rtol=rt_tol, atol=rt_tol,
+    )
+    self.assertAllClose(
+        lsp_stats.truncnorm.sf(x_isf, a, b, loc, scale),
+        q, rtol=rt_tol, atol=rt_tol,
+    )
+
+    # Ultra-narrow `[0, tiny_w]` exercises the near-endpoint PPF series + Newton
+    # step where `Phi(a) + q * mass` would round back to `Phi(a) = 0.5`.
+    tiny_tol = 2e-5 if is_f32 else 1e-13
+    tiny_w = np.array(1e-8 if is_f32 else 1e-20, dtype=dtype)
+    q_tiny = np.array([0.1, 0.25, 0.75, 0.9], dtype=dtype)
+    z_tiny = lsp_stats.truncnorm.ppf(q_tiny, dtype(0.0), tiny_w)
+    self.assertAllClose(z_tiny / tiny_w, q_tiny, rtol=tiny_tol, atol=tiny_tol)
+    self.assertAllClose(
+        lsp_stats.truncnorm.cdf(z_tiny, dtype(0.0), tiny_w),
+        q_tiny, rtol=tiny_tol, atol=tiny_tol,
+    )
+
+    # Extreme tail (`a = 1000`, `dx = 2^-10` exact in float32): approaches
+    # shifted `Exp(rate=a)`, so `logpdf ~= log(a) - a*dx`, `cdf ~= 1 - e^-a*dx`.
+    far_dx = 2.0**-10
+    far_x = dtype(1000.0 + far_dx)
+    rate_dx = 1000.0 * far_dx
+    self.assertAllClose(
+        lsp_stats.truncnorm.logpdf(far_x, dtype(1000.0), dtype(1002.0)),
+        np.array(np.log(1000.0) - rate_dx, dtype=dtype),
+        rtol=1e-4, atol=1e-4,
+    )
+    self.assertAllClose(
+        lsp_stats.truncnorm.cdf(far_x, dtype(1000.0), dtype(1002.0)),
+        np.array(-np.expm1(-rate_dx), dtype=dtype),
+        rtol=1e-4, atol=1e-4,
+    )
+
+  @jtu.sample_product(dtype=jtu.dtypes.all_floating)
+  def testTruncnormEdgeCases(self, dtype):
+    # Checks `< 32`-bit upcast/downcast dtype preservation, boundary and
+    # out-of-domain inputs, underflowing `scale^2`, and overflowing `a^2`.
+    a = jnp.array([0.5, 5.0], dtype=dtype)
+    b = jnp.array([0.6, 7.0], dtype=dtype)
+    q = jnp.array([0.25, 0.75], dtype=dtype)
+    x_ppf = lsp_stats.truncnorm.ppf(q, a, b)
+    lp = lsp_stats.truncnorm.logpdf(x_ppf, a, b)
+    lc = lsp_stats.truncnorm.logcdf(x_ppf, a, b)
+    self.assertEqual(x_ppf.dtype, dtype)
+    self.assertEqual(lp.dtype, dtype)
+    self.assertEqual(lc.dtype, dtype)
+    self.assertTrue(np.all(np.isfinite(lp)))
+    self.assertTrue(np.all(np.isfinite(lc)))
+    finfo = jnp.finfo(dtype)
+    if finfo.bits < 32:
+      x_ref = lsp_stats.truncnorm.ppf(
+          q.astype(np.float32), a.astype(np.float32), b.astype(np.float32)
+      ).astype(dtype)
+      self.assertAllClose(x_ppf, x_ref, rtol=2e-2, atol=2e-2)
+
+    q_edge = np.array([-0.1, 0.0, 1.0, 1.1], dtype=dtype)
+    self.assertAllClose(
+        lsp_stats.truncnorm.ppf(q_edge, -1.0, 2.0, 0.5, 1.5),
+        np.array([np.nan, -1.0, 3.5, np.nan], dtype=dtype),
+        check_dtypes=False,
+    )
+    self.assertAllClose(
+        lsp_stats.truncnorm.isf(q_edge, -1.0, 2.0, 0.5, 1.5),
+        np.array([np.nan, 3.5, -1.0, np.nan], dtype=dtype),
+        check_dtypes=False,
+    )
+    for a_bad, b_bad in ((2.0, 2.0), (3.0, 1.0)):
+      self.assertTrue(
+          np.isnan(
+              lsp_stats.truncnorm.ppf(dtype(0.5), dtype(a_bad), dtype(b_bad))
+          )
+      )
+    for bad_scale in (0.0, -1.0):
+      s_bad = dtype(bad_scale)
+      for fn in (
+          lsp_stats.truncnorm.logpdf,
+          lsp_stats.truncnorm.logcdf,
+          lsp_stats.truncnorm.ppf,
+      ):
+        val = fn(dtype(0.5), dtype(-1.0), dtype(2.0), dtype(0.0), s_bad)
+        self.assertTrue(np.isnan(val))
+
+    # Positive `scale` whose square underflows must still give finite `logpdf`.
+    tiny_scale = dtype(float(finfo.tiny) * 4.0)
+    self.assertTrue(
+        np.isfinite(
+            lsp_stats.truncnorm.logpdf(
+                dtype(0.0), dtype(-1.0), dtype(1.0), dtype(0.0), tiny_scale
+            )
+        )
+    )
+    # When `0.5 * a^2` overflows `log_mass` to `-inf`, interior quantiles
+    # collapse onto the finite endpoint rather than returning `+-inf`.
+    if float(finfo.max) > 1e38:
+      huge_a = dtype(1e20 if finfo.bits <= 32 else 1e155)
+      self.assertAllClose(
+          lsp_stats.truncnorm.ppf(dtype(0.5), huge_a, dtype(np.inf)), huge_a
+      )
+      self.assertAllClose(
+          lsp_stats.truncnorm.ppf(dtype(0.5), dtype(-np.inf), -huge_a), -huge_a
+      )
+
+  @jtu.sample_product(dtype=jtu.dtypes.floating)
+  def testTruncnormGradients(self, dtype):
+    # Numerical 1st-order JVP and VJP check across wide-central,
+    # narrow-quadrature, local-quantile-step, and far-tail (`erfcx`) regimes.
+    # Combine all 5 functions in one `check_grads` call so XLA compiles a single
+    # JVP/VJP pair.
+    is_f32 = jnp.finfo(dtype).bits <= 32
+    a_fin = jnp.array([-1.0, 1.2, 0.5, 6.0], dtype=dtype)
+    b_fin = jnp.array([1.0, 1.4, 0.65, 8.0], dtype=dtype)
+    x_fin = jnp.array([0.2, 1.3, 0.55, 6.5], dtype=dtype)
+    q_fin = jnp.array([0.3, 0.25, 0.25, 0.7], dtype=dtype)
+    loc = jnp.array(0.5, dtype=dtype)
+    scale = jnp.array(1.5, dtype=dtype)
+    eps = 1e-3 if is_f32 else 1e-6
+    grad_tol = 3e-2 if is_f32 else 1e-6
+
+    @jax.jit
+    def all_fns(x, q, a, b, l, s):
+      return (
+          lsp_stats.truncnorm.logpdf(x, a, b, l, s),
+          lsp_stats.truncnorm.logcdf(x, a, b, l, s),
+          lsp_stats.truncnorm.logsf(x, a, b, l, s),
+          lsp_stats.truncnorm.ppf(q, a, b, l, s),
+          lsp_stats.truncnorm.isf(q, a, b, l, s),
+      )
+
+    jtu.check_grads(
+        all_fns,
+        (x_fin * scale + loc, q_fin, a_fin, b_fin, loc, scale),
+        order=1, eps=eps, atol=grad_tol, rtol=grad_tol,
+    )
+
+  @jtu.sample_product(dtype=jtu.dtypes.floating)
+  def testTruncnormEdgeGradients(self, dtype):
+    # Edge-case AD regression checks where unselected branches or tie-breaking
+    # clamps previously produced NaNs or halved gradients. Pack all per-function
+    # edge inputs into one batch per function so XLA compiles 5 VJP graphs:
+    # 1. Semi-infinite and unbounded intervals (`a = -inf`, `b = +inf`) in
+    #    `logpdf`, `logcdf`, `logsf`, `ppf`, and `isf` wrt all 5 arguments.
+    # 2. Outside-support `logpdf` (`d/dx == 0`) and left-tail `logcdf` where
+    #    `logsf_in` rounds to `0.0` on the unused `log1p(-exp(logsf_in))` path.
+    # 3. `ppf` at the median of symmetric intervals (`z = 0`), at quantiles
+    #    rounding onto `a`, and on huge bounds (`|a| > sqrt(2 * fmax)`).
+    is_f32 = jnp.finfo(dtype).bits <= 32
+    loc = jnp.array(0.5, dtype=dtype)
+    scale = jnp.array(1.5, dtype=dtype)
+    a_inf = jnp.array([-jnp.inf, 2.0, -jnp.inf], dtype=dtype)
+    b_inf = jnp.array([2.0, jnp.inf, jnp.inf], dtype=dtype)
+    x_inf = jnp.array([0.5, 5.0, 0.5], dtype=dtype)
+    q_inf = jnp.array([0.25, 0.75, 0.4], dtype=dtype)
+
+    x_lp = jnp.concatenate([x_inf, jnp.array([-5.0, 5.0], dtype=dtype)])
+    a_lp = jnp.concatenate([a_inf, jnp.array([-1.0, -1.0], dtype=dtype)])
+    b_lp = jnp.concatenate([b_inf, jnp.array([2.0, 2.0], dtype=dtype)])
+
+    x_lc = jnp.concatenate([x_inf, jnp.array([-9.0, 0.0], dtype=dtype)])
+    a_lc = jnp.concatenate([a_inf, jnp.array([-10.0, -1.0], dtype=dtype)])
+    b_lc = jnp.concatenate([b_inf, jnp.array([2.0, 1.0], dtype=dtype)])
+
+    b_sym = jnp.array([0.75, 1.0, 2.0, 3.0], dtype=dtype)
+    huge_a = dtype(1e20 if is_f32 else 1e155)
+    huge_2a = dtype(2e20 if is_f32 else 2e155)
+    q_ppf = jnp.concatenate([
+        q_inf,
+        jnp.full(4, 0.5, dtype=dtype),
+        jnp.array([1e-20], dtype=dtype),
+        jnp.array(
+            [0.5, 1e-3, 1.0 - 1e-3, 0.5, 1e-3, 1.0 - 1e-3, 0.5, 0.5],
+            dtype=dtype,
+        ),
+    ])
+    a_ppf = jnp.concatenate([
+        a_inf,
+        -b_sym,
+        jnp.array([1.2], dtype=dtype),
+        jnp.array(
+            [
+                huge_a, huge_a, huge_a,
+                -jnp.inf, -jnp.inf, -jnp.inf,
+                huge_a, -huge_2a,
+            ],
+            dtype=dtype,
+        ),
+    ])
+    b_ppf = jnp.concatenate([
+        b_inf,
+        b_sym,
+        jnp.array([3.0], dtype=dtype),
+        jnp.array(
+            [
+                jnp.inf, jnp.inf, jnp.inf,
+                -huge_a, -huge_a, -huge_a,
+                huge_2a, -huge_a,
+            ],
+            dtype=dtype,
+        ),
+    ])
+
+    def edge_loss(x_p, a_p, b_p, x_c, a_c, b_c, x_s, q_s, a_s, b_s,
+                  q_q, a_q, b_q, l, s):
+      return (
+          jnp.sum(lsp_stats.truncnorm.logpdf(x_p, a_p, b_p, l, s))
+          + jnp.sum(lsp_stats.truncnorm.logcdf(x_c, a_c, b_c, l, s))
+          + jnp.sum(lsp_stats.truncnorm.logsf(x_s, a_s, b_s, l, s))
+          + jnp.sum(lsp_stats.truncnorm.ppf(q_q, a_q, b_q, l, s))
+          + jnp.sum(lsp_stats.truncnorm.isf(q_s, a_s, b_s, l, s))
+      )
+
+    grads = jax.jit(jax.grad(edge_loss, argnums=tuple(range(15))))(
+        x_lp, a_lp, b_lp, x_lc, a_lc, b_lc, x_inf, q_inf, a_inf, b_inf,
+        q_ppf, a_ppf, b_ppf, loc, scale,
+    )
+    for g in grads:
+      self.assertTrue(np.all(np.isfinite(g)))
+    self.assertAllClose(grads[0][3:], jnp.zeros(2, dtype=dtype))
+
+    # `d ppf(q, a, b, loc, scale) / dq == scale * d ppf(q, a, b) / dq`.
+    g_q_std = grads[10] / scale
+    expected_med = (
+        (2.0 * osp_stats.norm.cdf(np.asarray(b_sym, dtype=np.float64)) - 1.0)
+        * np.sqrt(2.0 * np.pi)
+    ).astype(dtype)
+    self.assertAllClose(
+        g_q_std[3:7], expected_med, rtol=1e-5 if is_f32 else 1e-12
+    )
+    expected_end = dtype(
+        (osp_stats.norm.cdf(3.0) - osp_stats.norm.cdf(1.2))
+        / osp_stats.norm.pdf(1.2)
+    )
+    self.assertAllClose(
+        g_q_std[7], expected_end, rtol=1e-5 if is_f32 else 1e-12
+    )
 
   @genNamedParametersNArgs(4)
   def testParetoLogPdf(self, shapes, dtypes):

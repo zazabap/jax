@@ -436,6 +436,15 @@ class ErfcxGradTest(jtu.JaxTestCase):
     self.assertLessEqual(np.max(util.ulp_diff(d2, ref_d2, dtype)), 35.0)
     self.assertLessEqual(np.max(util.ulp_diff(d3, ref_d3, dtype)), 1500.0)
 
+    # Non-`vmap` 2nd-order JVP checks 1D `threshold` broadcasting in
+    # `_erfcx_grad_jvp`.
+    t = jnp.ones_like(x)
+    _, d2_jvp = jax.jvp(
+        lambda u: jax.jvp(jsp.special.erfcx, (u,), (t,))[1], (x,), (t,)
+    )
+    d2_jvp_ulp = util.ulp_diff(np.asarray(d2_jvp), ref_d2, dtype)
+    self.assertLessEqual(np.max(d2_jvp_ulp), 35.0)
+
   @parameterized.named_parameters(
       {"testcase_name": "_float32", "dtype": f32},
       {"testcase_name": "_float64", "dtype": f64},

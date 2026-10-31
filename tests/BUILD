@@ -1604,13 +1604,11 @@ jax_multiplatform_test(
 jax_multiplatform_test(
     name = "scipy_stats_test",
     srcs = ["scipy_stats_test.py"],
+    # Use fewer cases to prevent timeouts.
+    args = ["--jax_num_generated_cases=40"],
     backend_tags = {
         "cpu": ["nomsan"],  # Times out
         "tpu": ["nomsan"],  # Times out
-    },
-    # Use fewer cases to prevent timeouts.
-    backend_variant_args = {
-        "cpu": ["--jax_num_generated_cases=40"],
     },
     shard_count = {
         "cpu": 50,

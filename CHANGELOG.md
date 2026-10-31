@@ -49,6 +49,11 @@ When releasing, please add the new-release-boilerplate to docs/pallas/CHANGELOG.
     {func}`jax.lax.atanpi`, and {func}`jax.lax.atan2pi`, which compute the
     inverse trigonometric functions divided by `pi` (`asin(x) / pi`,
     `acos(x) / pi`, `atan(x) / pi`, and `atan2(x, y) / pi`).
+  * Added {func}`jax.scipy.stats.truncnorm.ppf` and
+    {func}`jax.scipy.stats.truncnorm.isf`, improved the accuracy of
+    {mod}`jax.scipy.stats.truncnorm` functions on narrow intervals and in the
+    tails, and made all {mod}`jax.scipy.stats.truncnorm` functions return `NaN`
+    when `scale <= 0` (matching SciPy).
 
 * Breaking changes
   * The `jax_use_simplified_jaxpr_constants` configuration flag is now `True`
