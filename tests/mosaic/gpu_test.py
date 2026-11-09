@@ -4207,6 +4207,7 @@ class Sm80Test(TestCase):
           gmem_transform=mgpu.TileTransform((8, swizzle_elems)),
           barrier=barrier,
           implementation=mgpu.AsyncCopyImplementation.CP_ASYNC,
+          oob_mode=mgpu.OOBFillMode.PROMISE_IN_BOUNDS,
       )
       barrier.wait()
       if transpose:
@@ -5421,6 +5422,7 @@ class AsyncCopyTest(TestCase, jtu.CudaArchSpecificTest):
           swizzle=swizzle,
           gmem_transform=mgpu.TileTransform(tiling) if tiling else (),
           implementation=mgpu.AsyncCopyImplementation.CP_ASYNC,
+          oob_mode=mgpu.OOBFillMode.PROMISE_IN_BOUNDS,
           barrier=barrier if use_barrier else None,
       )
       if use_barrier:
@@ -5484,6 +5486,7 @@ class AsyncCopyTest(TestCase, jtu.CudaArchSpecificTest):
           swizzle=swizzle,
           gmem_transform=mgpu.TileTransform(tiling),
           implementation=mgpu.AsyncCopyImplementation.CP_ASYNC,
+          oob_mode=mgpu.OOBFillMode.PROMISE_IN_BOUNDS,
           barrier=barrier if use_barrier else None,
       )
       if use_barrier:
@@ -5526,6 +5529,7 @@ class AsyncCopyTest(TestCase, jtu.CudaArchSpecificTest):
           dst_ref=tmp,
           gmem_slice=slice,
           implementation=mgpu.AsyncCopyImplementation.CP_ASYNC,
+          oob_mode=mgpu.OOBFillMode.PROMISE_IN_BOUNDS,
           barrier=barrier if use_barrier else None,
       )
       if use_barrier:
